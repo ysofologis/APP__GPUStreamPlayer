@@ -6,29 +6,33 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render, Window,
-    WindowBounds, WindowOptions,
+    div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, Entity,
+    FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ObjectFit, Pixels, Point, Render, Window, WindowBounds, WindowOptions,
 };
 use gpui_video_player::video;
 
 use crate::metadata::{self, TrackInfo};
 use crate::player::Engine;
 use crate::source::{self, ResolveError, Resolved};
+use crate::text_input::{TextInput, TextInputEvent};
 
 const WINDOW_W: f32 = 1280.0;
 const WINDOW_H: f32 = 760.0;
-/// Width of the right-hand info panel.
+/// Default width of the right-hand info panel.
 const PANEL_W: f32 = 320.0;
+/// Bounds for the drag-resizable panel.
+const PANEL_MIN_W: f32 = 220.0;
+const PANEL_MAX_W: f32 = 620.0;
 
 // Palette -- one place to retheme.
-const BG: u32 = 0x0d1117;
-const PANEL: u32 = 0x161b22;
-const BORDER: u32 = 0x30363d;
-const TEXT: u32 = 0xe6edf3;
-const MUTED: u32 = 0x8b949e;
-const ACCENT: u32 = 0x58a6ff;
-const DANGER: u32 = 0xf85149;
+pub(crate) const BG: u32 = 0x0d1117;
+pub(crate) const PANEL: u32 = 0x161b22;
+pub(crate) const BORDER: u32 = 0x30363d;
+pub(crate) const TEXT: u32 = 0xe6edf3;
+pub(crate) const MUTED: u32 = 0x8b949e;
+pub(crate) const ACCENT: u32 = 0x58a6ff;
+pub(crate) const DANGER: u32 = 0xf85149;
 
 /// Which control a keyboard shortcut or click activated.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -50,8 +54,10 @@ enum Action {
 pub struct PlayerView {
     /// `None` before the first successful resolve.
     engine: Option<Engine>,
-    /// What the user typed / dropped.
-    url_input: String,
+    /// Editable URL field. Owns its own focus, selection and IME state.
+    url_input: Entity<TextInput>,
+    /// Mirror of the field's text, updated on every change; what `load_url` uses.
+    url: String,
     /// Set while a resolve is in flight so the UI can show a spinner state.
     loading: bool,
     /// Last error worth showing; cleared on the next attempt.
@@ -80,13 +86,35 @@ pub struct PlayerView {
     info_loading: bool,
     /// Scroll position of the info panel; reset to the top on every new source.
     info_scroll: gpui::ScrollHandle,
+    /// Drag-resizable width of the info panel.
+    panel_width: f32,
+    /// True while the splitter between video and panel is being dragged.
+    resizing_splitter: bool,
+    /// Transient "copied" confirmation: (what was copied, when).
+    copied: Option<(String, std::time::Instant)>,
+}
+
+/// Build the URL field entity and subscribe to its events.
+fn placeholder_url_input(cx: &mut Context<PlayerView>) -> Entity<TextInput> {
+    cx.new(|cx| TextInput::new("Paste a YouTube link, MP3/Icecast URL, .m3u8, or a file path…", cx))
 }
 
 impl PlayerView {
+    /// Resolve the URL currently in the field and start playback.
+    fn submit_input(&mut self, cx: &mut Context<Self>) {
+        let text = self.url_input.read(cx).text();
+        if text.trim().is_empty() || self.loading {
+            return;
+        }
+        self.url = text;
+        self.load_url(cx);
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         let view = Self {
             engine: None,
-            url_input: String::new(),
+            url_input: placeholder_url_input(cx),
+            url: String::new(),
             loading: false,
             error: None,
             current: None,
@@ -105,7 +133,25 @@ impl PlayerView {
             info: TrackInfo::default(),
             info_loading: false,
             info_scroll: gpui::ScrollHandle::new(),
+            panel_width: PANEL_W,
+            resizing_splitter: false,
+            copied: None,
         };
+        // Mirror the field into `url` and submit on Enter.
+        cx.subscribe(&view.url_input, |view, _input, event: &TextInputEvent, cx| {
+            match event {
+                TextInputEvent::Changed(text) => {
+                    view.url = text.clone();
+                    cx.notify();
+                }
+                TextInputEvent::Submitted(text) => {
+                    view.url = text.clone();
+                    view.submit_input(cx);
+                }
+            }
+        })
+        .detach();
+
         view.start_transport_poll(cx);
         view
     }
@@ -166,7 +212,7 @@ impl PlayerView {
 
     /// Submit `url_input` for resolution, then start playback.
     fn load_url(&mut self, cx: &mut Context<Self>) {
-        let input = self.url_input.trim().to_string();
+        let input = self.url.trim().to_string();
         if input.is_empty() || self.loading {
             return;
         }
@@ -322,26 +368,70 @@ impl PlayerView {
 
     /// A labelled "key / value" row. Returns `None` when the value is missing so
     /// absent facts leave no gap.
-    fn info_row(&self, label: &'static str, value: Option<String>) -> Option<impl IntoElement> {
+    ///
+    /// Clicking the row copies `copy_value` (the underlying text, not the
+    /// display string) to the clipboard.
+    fn info_row(
+        &self,
+        label: &'static str,
+        value: Option<String>,
+        copy_value: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
         let value = value.filter(|v| !v.is_empty())?;
-        Some(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(rgb(0x6e7681))
-                        .child(label),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(TEXT))
-                        .child(value),
-                ),
-        )
+        let copyable = copy_value.filter(|v| !v.is_empty());
+
+        // Build the row in two shapes: `id()`/`on_click()` return a
+        // `Stateful<Div>`, which is a different type from `Div`, so the
+        // branches are erased to `AnyElement` instead of using `when_some`.
+        let base = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .child(div().text_xs().text_color(rgb(0x6e7681)).child(label))
+            .child(div().text_sm().text_color(rgb(TEXT)).child(value));
+
+        let row: gpui::AnyElement = match copyable {
+            Some(text) => base
+                .id(gpui::SharedString::from(format!("row-{label}")))
+                .cursor(CursorStyle::PointingHand)
+                .rounded_sm()
+                .hover(|style| style.bg(rgba(0xffffff10)))
+                .on_click(cx.listener(move |view, _, _, cx| {
+                    view.copy_to_clipboard(text.clone(), cx);
+                }))
+                .into_any_element(),
+            None => base.into_any_element(),
+        };
+
+        Some(row)
+    }
+
+    /// Copy `text` and flash a confirmation under the panel title.
+    fn copy_to_clipboard(&mut self, text: String, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
+        self.copied = Some((text, std::time::Instant::now()));
+        cx.notify();
+
+        // Clear the "copied" badge after a moment so it is not permanent state.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(1400))
+                .await;
+            this.update(cx, |view, cx| {
+                if let Some((_, at)) = &view.copied {
+                    if at.elapsed() >= Duration::from_millis(1300) {
+                        view.copied = None;
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Horizontal rule. `flex_none` because a 1px flex child in an overflowing
@@ -394,12 +484,12 @@ impl PlayerView {
         }
     }
 
-    fn info_panel(&self) -> impl IntoElement {
+    fn info_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let info = &self.info;
 
         let shell = div()
             .id("info-panel")
-            .w(px(PANEL_W))
+            .w(px(self.panel_width))
             .flex_none()
             .h_full()
             .min_h(px(0.0))
@@ -469,6 +559,31 @@ impl PlayerView {
             );
         }
 
+        // Transient confirmation after a row click.
+        if let Some((copied, _)) = self.copied.clone() {
+            body = body.child(
+                div()
+                    .flex_none()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgba(0x58a6ff22))
+                    .border_1()
+                    .border_color(rgb(ACCENT))
+                    .text_xs()
+                    .text_color(rgb(ACCENT))
+                    .child(format!("copied {}", elide_middle(&copied, 40))),
+            );
+        }
+
+        // The source URL, click to copy.
+        let url = if self.url.trim().is_empty() {
+            None
+        } else {
+            Some(self.url.trim().to_string())
+        };
+
         // Playback facts.
         let resolution = info.resolution.clone();
         let container = info.container.clone().map(|c| c.to_uppercase());
@@ -488,11 +603,11 @@ impl PlayerView {
         let mut facts = div().flex().flex_col().gap_2();
         let mut any = false;
         for row in [
-            self.info_row("FORMAT", container),
-            self.info_row("RESOLUTION", resolution),
-            self.info_row("CODECS", codecs),
-            self.info_row("BITRATE", info.bitrate.clone()),
-            self.info_row("AUDIO", audio_detail),
+            self.info_row("FORMAT", container.clone(), container, cx),
+            self.info_row("RESOLUTION", resolution.clone(), resolution, cx),
+            self.info_row("CODECS", codecs.clone(), codecs, cx),
+            self.info_row("BITRATE", info.bitrate.clone(), info.bitrate.clone(), cx),
+            self.info_row("AUDIO", audio_detail.clone(), audio_detail, cx),
         ]
         .into_iter()
         .flatten()
@@ -512,11 +627,11 @@ impl PlayerView {
         let views = info.view_count.map(format_count);
         let likes = info.like_count.map(format_count);
         for row in [
-            self.info_row("CHANNEL", None::<String>),
-            self.info_row("UPLOADED", info.upload_date.clone()),
-            self.info_row("VIEWS", views),
-            self.info_row("LIKES", likes),
-            self.info_row("SOURCE", info.provider.clone()),
+            self.info_row("URL", url.clone(), url, cx),
+            self.info_row("UPLOADED", info.upload_date.clone(), info.upload_date.clone(), cx),
+            self.info_row("VIEWS", views.clone(), views.map(|v| v.replace('.', "")), cx),
+            self.info_row("LIKES", likes.clone(), likes, cx),
+            self.info_row("SOURCE", info.provider.clone(), info.provider.clone(), cx),
         ]
         .into_iter()
         .flatten()
@@ -558,6 +673,61 @@ impl PlayerView {
         }
 
         shell.child(body)
+    }
+
+    /// Draggable divider between the video and the info panel.
+    ///
+    /// Uses window-relative coordinates: `MouseMoveEvent.position` is in window
+    /// space, so the new panel width is `window width - pointer x`. Starting a
+    /// drag records nothing but a flag; the splitter redraws from `position`.
+    fn splitter(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.resizing_splitter;
+        div()
+            .id("panel-splitter")
+            .flex_none()
+            .w(px(6.0))
+            .h_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor(CursorStyle::ResizeLeftRight)
+            .when(active, |this| this.bg(rgb(ACCENT)))
+            .hover(|style| style.bg(rgba(0x58a6ff66)))
+            .child(div().w(px(2.0)).h(px(48.0)).rounded_full().bg(rgb(BORDER)))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseDownEvent, _, cx| {
+                    view.resizing_splitter = true;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _, cx| {
+                    view.resizing_splitter = false;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view, _: &MouseUpEvent, _, cx| {
+                    view.resizing_splitter = false;
+                    cx.notify();
+                }),
+            )
+            .on_mouse_move(cx.listener(|view, event: &MouseMoveEvent, window, cx| {
+                if !view.resizing_splitter {
+                    return;
+                }
+                let pointer_x: f32 = event.position.x.into();
+                // `viewport_size` is this window's own size; `bounds()` is global
+                // and would include other monitors.
+                let window_w: f32 = window.viewport_size().width.into();
+                // Leave room for the splitter itself and a usable video area.
+                let candidate = window_w - pointer_x - 6.0;
+                view.panel_width = candidate.clamp(PANEL_MIN_W, PANEL_MAX_W);
+                cx.notify();
+            }))
     }
 
     fn chip(&self, text: String, color: u32) -> impl IntoElement {
@@ -685,63 +855,29 @@ impl PlayerView {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let loading = self.loading;
+
         div()
             .flex()
             .items_center()
             .gap_2()
             .w_full()
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(PANEL))
-                    .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_color(if self.url_input.is_empty() {
-                        rgb(MUTED)
-                    } else {
-                        rgb(TEXT)
-                    })
-                    .child(if self.url_input.is_empty() {
-                        "Paste a YouTube link, an MP3/Icecast URL, an .m3u8, or a local file path…"
-                            .to_string()
-                    } else {
-                        elide_middle(&self.url_input, 96)
-                    })
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|view, _, window, cx| {
-                            // Seed the field from the clipboard -- the common case
-                            // is "copy a link, then click the bar".
-                            if view.url_input.is_empty() {
-                                if let Some(text) = cx.read_from_clipboard().and_then(|i| i.text()) {
-                                    let text = text.trim().to_string();
-                                    if !text.is_empty() {
-                                        view.url_input = text;
-                                    }
-                                }
-                            }
-                            view.focus = view.focus.clone();
-                            window.focus(&view.focus);
-                            cx.notify();
-                        }),
-                    ),
-            )
+            .child(self.url_input.clone())
             .child(
                 div()
                     .id("play-url")
+                    .flex_none()
+                    // Match the URL field's height so the two controls line up.
+                    .h(px(28.0))
                     .px_4()
-                    .py_2()
+                    .flex()
+                    .items_center()
                     .rounded_md()
                     .bg(if loading { rgb(PANEL) } else { rgb(ACCENT) })
                     .text_color(if loading { rgb(MUTED) } else { rgb(0x0d1117) })
                     .cursor(CursorStyle::PointingHand)
                     .child(if loading { "Opening…" } else { "Open" })
                     .when(!loading, |this| {
-                        this.on_click(cx.listener(|view, _, _, cx| view.load_url(cx)))
+                        this.on_click(cx.listener(|view, _, _, cx| view.submit_input(cx)))
                     }),
             )
     }
@@ -953,12 +1089,21 @@ impl PlayerView {
         if event.is_held {
             return;
         }
+        // While the URL field has focus, every keystroke belongs to it. The
+        // root's `on_key_down` still receives the event (it is an ancestor of
+        // the focused node), so without this guard typing "left" would seek
+        // backwards and "m" would mute.
+        if self.url_input.read(cx).is_focused(window) {
+            return;
+        }
         let action = match event.keystroke.key.as_str() {
+            // Keep space out of the URL field: it belongs to play/pause only
+            // when nothing is focused for text entry.
             "space" => {
-                if self.url_input.is_empty() {
-                    None
-                } else {
+                if self.engine.is_some() {
                     Some(Action::PlayPause)
+                } else {
+                    None
                 }
             }
             "left" => Some(Action::Back10),
@@ -1012,7 +1157,8 @@ impl Render for PlayerView {
                             .h_full()
                             .child(self.stage()),
                     )
-                    .child(self.info_panel()),
+                    .child(self.splitter(cx))
+                    .child(self.info_panel(cx)),
             )
             .child(self.transport_bar(cx))
     }
@@ -1082,6 +1228,10 @@ fn describe_error(error: ResolveError) -> String {
 
 /// Open the main window.
 pub fn launch(cx: &mut App, initial_url: Option<String>) {
+    // Editing shortcuts are scoped to the "TextInput" key context, so they do
+    // not swallow the player's global shortcuts.
+    crate::text_input::bind_keys(cx);
+
     let bounds = Bounds::centered(None, size(px(WINDOW_W), px(WINDOW_H)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -1104,8 +1254,10 @@ pub fn launch(cx: &mut App, initial_url: Option<String>) {
         // makes the app usable from a shell/desktop entry.
         if let Some(url) = initial_url {
             view.update(cx, |view, cx| {
-                view.url_input = url;
-                view.load_url(cx);
+                // Setting the entity fires `Changed`, which updates `view.url`.
+                let input = view.url_input.clone();
+                input.update(cx, |input, cx| input.set_text(url, cx));
+                view.submit_input(cx);
             });
         }
         view

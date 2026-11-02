@@ -6,6 +6,7 @@
 mod metadata;
 mod player;
 mod source;
+mod text_input;
 mod ui;
 
 use gpui::{App, Application};

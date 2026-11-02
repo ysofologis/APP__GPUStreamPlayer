@@ -274,25 +274,77 @@ fn yt_dlp_stream(page: &str) -> Result<String, ResolveError> {
     })
 }
 
+/// Extra arguments for every `yt-dlp` invocation.
+///
+/// YouTube serves a "Sign in to confirm you're not a bot" page to
+/// rate-limited / datacenter IPs. Cookies are the documented way around it:
+/// export them from a signed-in browser (Netscape format) and point the app
+/// at the file.
+///
+/// Resolution order:
+///   1. `STREAM_PLAYER_COOKIES` -- explicit path to a Netscape cookies file.
+///   2. `STREAM_PLAYER_COOKIES_FROM_BROWSER` -- browser name, e.g. `chromium`.
+///   3. `~/.config/stream-player/cookies.txt` -- conventional location.
+pub fn yt_dlp_cookie_args() -> Vec<String> {
+    let mut args = Vec::new();
+
+    if let Some(path) = std::env::var_os("STREAM_PLAYER_COOKIES") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            args.push("--cookies".into());
+            args.push(path.to_string_lossy().into_owned());
+            return args;
+        }
+    }
+
+    if let Some(browser) = std::env::var_os("STREAM_PLAYER_COOKIES_FROM_BROWSER") {
+        args.push("--cookies-from-browser".into());
+        args.push(browser.to_string_lossy().into_owned());
+        return args;
+    }
+
+    if let Some(dir) = config_dir() {
+        let path = dir.join("cookies.txt");
+        if path.is_file() {
+            args.push("--cookies".into());
+            args.push(path.to_string_lossy().into_owned());
+        }
+    }
+
+    args
+}
+
+/// `~/.config/stream-player`, or `$XDG_CONFIG_HOME/stream-player`.
+fn config_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    Some(base.join("stream-player"))
+}
+
 fn run_yt_dlp(page: &str, selector: &str) -> Result<String, ResolveError> {
-    let output = Command::new("yt-dlp")
-        .args([
-            "--no-playlist",
-            "--no-warnings",
-            "--no-progress",
-            "-f",
-            selector,
-            "-g",
-            page,
-        ])
+    let mut command = Command::new("yt-dlp");
+    command.args([
+        "--no-playlist",
+        "--no-warnings",
+        "--no-progress",
+        "-f",
+        selector,
+        "-g",
+    ]);
+    command.args(yt_dlp_cookie_args());
+    command.arg(page);
+
+    let output = command
         .stdin(Stdio::null())
         .output()
         .map_err(|_| ResolveError::MissingBinary("yt-dlp"))?;
 
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(ResolveError::Tool {
             tool: "yt-dlp",
-            message: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            message: explain_yt_dlp_error(&stderr),
         });
     }
 
@@ -308,9 +360,42 @@ fn run_yt_dlp(page: &str, selector: &str) -> Result<String, ResolveError> {
         })
 }
 
+/// Turn yt-dlp's raw stderr into something actionable.
+///
+/// The bot check is by far the most common failure for a self-hosted player:
+/// YouTube rate-limits datacenter IPs, and the raw message points at the
+/// wiki without saying what to do here.
+fn explain_yt_dlp_error(stderr: &str) -> String {
+    let lower = stderr.to_ascii_lowercase();
+    if lower.contains("sign in to confirm") || lower.contains("not a bot") {
+        return "YouTube is asking this IP to prove it is not a bot (rate limit).\n\n\
+            Fix: export cookies from a browser where you are signed in to YouTube and\n\
+            save them to ~/.config/stream-player/cookies.txt (Netscape format),\n\
+            or set STREAM_PLAYER_COOKIES_FROM_BROWSER=chromium.\n\n\
+            See: https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+            .to_string();
+    }
+    if lower.contains("private video") {
+        return "This video is private.".to_string();
+    }
+    if lower.contains("video unavailable") || lower.contains("removed") {
+        return "This video is unavailable or has been removed.".to_string();
+    }
+    if lower.contains("unsupported url") {
+        return "yt-dlp does not support this URL.".to_string();
+    }
+    if stderr.is_empty() {
+        return "no playable format found for this URL".to_string();
+    }
+    stderr.to_string()
+}
+
 fn run_yt_dlp_stderr(page: &str) -> String {
-    Command::new("yt-dlp")
-        .args(["--no-playlist", "--no-warnings", "-f", "b", "--simulate", page])
+    let mut command = Command::new("yt-dlp");
+    command.args(["--no-playlist", "--no-warnings", "-f", "b", "--simulate"]);
+    command.args(yt_dlp_cookie_args());
+    command.arg(page);
+    command
         .stdin(Stdio::null())
         .output()
         .map(|out| {
@@ -457,6 +542,21 @@ mod tests {
     #[test]
     fn rejects_garbage() {
         assert!(classify("not a url and not a file").is_err());
+    }
+
+    #[test]
+    fn explains_bot_check_actionably() {
+        let msg = explain_yt_dlp_error("ERROR: [youtube] abc: Sign in to confirm you're not a bot.");
+        assert!(msg.contains("cookies"), "should mention cookies: {msg}");
+        assert!(msg.contains("STREAM_PLAYER_COOKIES_FROM_BROWSER"), "should name the env var: {msg}");
+    }
+
+    #[test]
+    fn explains_other_errors_plainly() {
+        assert_eq!(explain_yt_dlp_error("ERROR: [youtube] x: Private video."), "This video is private.");
+        assert_eq!(explain_yt_dlp_error("ERROR: Unsupported URL"), "yt-dlp does not support this URL.");
+        assert_eq!(explain_yt_dlp_error(""), "no playable format found for this URL");
+        assert_eq!(explain_yt_dlp_error("some other problem"), "some other problem");
     }
 
     #[test]

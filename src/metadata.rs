@@ -113,8 +113,11 @@ fn fetch_from_extractor(page: &str) -> TrackInfo {
         return TrackInfo::default();
     }
 
-    let output = Command::new("yt-dlp")
-        .args(["--no-playlist", "--no-warnings", "-J", page])
+    let mut command = Command::new("yt-dlp");
+    command.args(["--no-playlist", "--no-warnings", "-J"]);
+    command.args(source::yt_dlp_cookie_args());
+    command.arg(page);
+    let output = command
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output();

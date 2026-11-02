@@ -13,6 +13,28 @@ Plays:
 | DASH | `https://host/manifest.mpd` | GStreamer (`dashdemux`) |
 | Local files | `/path/movie.mkv` | GStreamer |
 
+## YouTube bot check
+
+YouTube rate-limits datacenter IPs and answers with *"Sign in to confirm you're
+not a bot"*. When that happens, the player says so explicitly instead of dumping
+yt-dlp's raw stderr. The fix is to give yt-dlp cookies from a browser where you
+are signed in to YouTube:
+
+```sh
+# Export cookies in Netscape format, then:
+mkdir -p ~/.config/stream-player
+cp /path/to/cookies.txt ~/.config/stream-player/cookies.txt
+
+# or point at a browser profile directly:
+export STREAM_PLAYER_COOKIES_FROM_BROWSER=chromium
+
+# or an explicit file:
+export STREAM_PLAYER_COOKIES=/path/to/cookies.txt
+```
+
+Resolution order: `STREAM_PLAYER_COOKIES` → `STREAM_PLAYER_COOKIES_FROM_BROWSER` →
+`~/.config/stream-player/cookies.txt`.
+
 ## Requirements
 
 **Build:** Rust ≥ 1.85, `pkg-config`, GStreamer 1.14+ development headers
@@ -52,17 +74,29 @@ cargo build --release
 | `↑` / `↓` | Volume ± 5 % |
 | `M` | Mute |
 | `F` | Fullscreen |
-| Click the URL bar | Paste from clipboard |
+| Click the URL bar | Focus the field (paste with `Ctrl+V`) |
+| `Enter` in the URL field | Open / play |
 | Click the timeline | Seek to that position |
 
 Buttons: `« 60`, `‹ 10`, play/pause, `10 ›`, `60 »`, speed `−`/`+` (click the
 value to reset to 1×), mute, volume `−`/`+`, fullscreen.
+
+The player shortcuts are suppressed while the URL field has focus, so typing
+`left` or `m` in the field does not seek or mute.
+
+### Info panel
+
+The right-hand panel can be **dragged wider or narrower** by the splitter
+between the video and the panel. Clicking any value in the panel copies it to
+the clipboard (the source URL, channel, views, likes, format, codecs, ...),
+and a badge confirms what was copied.
 
 ## Architecture
 
 ```
 src/
 ├── main.rs      entry point, dependency checks, CLI arg
+├── text_input.rs  editable single-line URL field (GPUI has no text widget)
 ├── source.rs    URL classification + resolution (yt-dlp, ffprobe), file:// URLs
 ├── metadata.rs  track info for the side panel (yt-dlp -J / ffprobe / artwork)
 ├── player.rs    playback engine: video backend + audio backend, transport state

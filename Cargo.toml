@@ -9,6 +9,7 @@ description = "A GPUI-based stream player for Linux: YouTube, MP3/Icecast radio,
 gpui = "0.2"
 gpui-video-player = "0.1.3"
 serde_json = "1"
+unicode-segmentation = "1"
 url = "2"
 log = "0.4"
 env_logger = "0.11"
