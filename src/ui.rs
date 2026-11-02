@@ -8,7 +8,7 @@ use std::time::Duration;
 use gpui::{
     div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, Entity,
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ObjectFit, Pixels, Point, Render, Window, WindowBounds, WindowOptions,
+    ObjectFit, PathPromptOptions, Pixels, Point, Render, Window, WindowBounds, WindowOptions,
 };
 use gpui_video_player::video;
 
@@ -862,11 +862,32 @@ impl PlayerView {
             .gap_2()
             .w_full()
             .child(self.url_input.clone())
+            // "Open" -- pick a local file through the platform file dialog and
+            // load it into the field.
+            .child(
+                div()
+                    .id("open-file")
+                    .flex_none()
+                    .h(px(28.0))
+                    .px_4()
+                    .flex()
+                    .items_center()
+                    .rounded_md()
+                    .bg(rgb(PANEL))
+                    .border_1()
+                    .border_color(rgb(BORDER))
+                    .text_color(rgb(TEXT))
+                    .cursor(CursorStyle::PointingHand)
+                    .hover(|style| style.bg(rgba(0xffffff14)).border_color(rgb(ACCENT)))
+                    .child("Open")
+                    .on_click(cx.listener(|view, _, _, cx| view.pick_file(cx))),
+            )
+            // "Play" -- resolve and play whatever is in the field.
             .child(
                 div()
                     .id("play-url")
                     .flex_none()
-                    // Match the URL field's height so the two controls line up.
+                    // Match the URL field's height so the controls line up.
                     .h(px(28.0))
                     .px_4()
                     .flex()
@@ -875,11 +896,59 @@ impl PlayerView {
                     .bg(if loading { rgb(PANEL) } else { rgb(ACCENT) })
                     .text_color(if loading { rgb(MUTED) } else { rgb(0x0d1117) })
                     .cursor(CursorStyle::PointingHand)
-                    .child(if loading { "Opening…" } else { "Open" })
+                    .child(if loading { "Opening…" } else { "Play" })
                     .when(!loading, |this| {
                         this.on_click(cx.listener(|view, _, _, cx| view.submit_input(cx)))
                     }),
             )
+    }
+
+    /// Open the platform file picker and put the chosen path in the field.
+    ///
+    /// The dialog is asynchronous: the platform relays the result on a
+    /// oneshot channel, so the selection is handled in a spawned task.
+    fn pick_file(&mut self, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Select a media file".into()),
+        });
+
+        cx.spawn(async move |this, cx| {
+            let Ok(result) = receiver.await else {
+                return;
+            };
+            let Ok(Some(paths)) = result else {
+                // Cancelled, or the picker could not be opened (common on
+                // Linux over X11 without a portal service).
+                this.update(cx, |view, cx| {
+                    view.error = Some(
+                        "Could not open the file dialog. Install a file portal \
+                         (xdg-desktop-portal) or pass a path in the text box."
+                            .into(),
+                    );
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+
+            this.update(cx, |view, cx| {
+                let text = path.to_string_lossy().into_owned();
+                view.url = text.clone();
+                let input = view.url_input.clone();
+                input.update(cx, |input, cx| input.set_text(text, cx));
+                // A picked file is played straight away -- that is the point
+                // of the button.
+                view.submit_input(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn stage(&self) -> impl IntoElement {

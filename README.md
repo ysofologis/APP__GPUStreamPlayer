@@ -35,6 +35,21 @@ export STREAM_PLAYER_COOKIES=/path/to/cookies.txt
 Resolution order: `STREAM_PLAYER_COOKIES` → `STREAM_PLAYER_COOKIES_FROM_BROWSER` →
 `~/.config/stream-player/cookies.txt`.
 
+**Exporting cookies from a running Chrome.** Chrome encrypts its cookie store
+with a key held in the OS keyring, which yt-dlp cannot always read (it needs
+the `secretstorage` Python module, and the key must be unlocked). The bundled
+script sidesteps that by reading the cookies over Chrome's DevTools protocol:
+
+```sh
+# Start Chrome with a debug port (or use your existing chrome-devtools-mcp):
+google-chrome --remote-debugging-port=9232
+
+python3 scripts/export-youtube-cookies.py
+# -> wrote 45 YouTube cookies to ~/.config/stream-player/cookies.txt
+```
+
+The app then picks them up automatically.
+
 ## Requirements
 
 **Build:** Rust ≥ 1.85, `pkg-config`, GStreamer 1.14+ development headers
@@ -78,8 +93,15 @@ cargo build --release
 | `Enter` in the URL field | Open / play |
 | Click the timeline | Seek to that position |
 
-Buttons: `« 60`, `‹ 10`, play/pause, `10 ›`, `60 »`, speed `−`/`+` (click the
-value to reset to 1×), mute, volume `−`/`+`, fullscreen.
+Header buttons:
+
+| Button | Action |
+|---|---|
+| `Open` | Open the platform file dialog and play the chosen file |
+| `Play` | Resolve and play whatever is in the text box |
+
+Transport buttons: `« 60`, `‹ 10`, play/pause, `10 ›`, `60 »`, speed `−`/`+`
+(click the value to reset to 1×), mute, volume `−`/`+`, fullscreen.
 
 The player shortcuts are suppressed while the URL field has focus, so typing
 `left` or `m` in the field does not seek or mute.
