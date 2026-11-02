@@ -399,20 +399,19 @@ rebuilding the pipeline via `Video::from_gst_pipeline` with different caps.
 calls `fontdb::Database::load_system_fonts()` at startup, which enumerates
 every font fontconfig knows about. On a machine with a very large font
 collection (this project was developed on one with **14 GB / 9,231 files** under
-`~/.local/share/fonts`) it spends minutes in page faults before the first
-frame. Scope fontconfig down:
+`~/.local/share/fonts`) it can spend minutes in page faults before the first
+frame. The app now handles this itself: before opening a window it counts the
+files in `~/.local/share/fonts` and `~/.fonts`, and past 500 it writes a
+scoped config to `~/.cache/stream-player/fonts-scoped.conf` (system font
+directories only) and points `FONTCONFIG_FILE` at it for its own process.
+An explicit `FONTCONFIG_FILE` in the environment always wins, and if the
+automatic scoping is not wanted, `FONTCONFIG_FILE=/etc/fonts/fonts.conf`
+restores full enumeration.
 
-```sh
-cat > ~/.config/fontconfig/fonts.conf <<'EOF'
-<?xml version="1.0"?><!DOCTYPE fontconfig SYSTEM "fonts.dtd">
-<fontconfig>
-  <dir>/usr/share/fonts</dir>
-  <cachedir>/var/cache/fontconfig</cachedir>
-</fontconfig>
-EOF
-```
-
-or launch with `FONTCONFIG_FILE=/path/to/minimal.conf`.
+Related: `fontdb` may print `Failed to load a font face ... doesn't have a
+family name` warnings for valid fonts (it is a fontdb name-table quirk, not
+broken files). The scoped scan avoids most of it; the warnings themselves are
+harmless.
 
 **`gstreamer-sys` fails with "The system library gstreamer-1.0 was not found".**
 A `pkg-config` earlier in `PATH` is shadowing the system one. Check with
