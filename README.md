@@ -1,0 +1,153 @@
+# stream-player
+
+A GPUI desktop stream player for Linux. Paste a URL, press Open.
+
+Plays:
+
+| Source | Example | Resolved by |
+|---|---|---|
+| YouTube / Vimeo / SoundCloud / Twitch / ~10 more | `https://youtu.be/...` | `yt-dlp` |
+| Direct audio (MP3, M4A, OGG, FLAC, Opus) | `https://host/track.mp3` | GStreamer |
+| Icecast / Shoutcast / radio | `https://host:8000/stream` | GStreamer |
+| HLS | `https://host/live/index.m3u8` | GStreamer (`hlsdemux`) |
+| DASH | `https://host/manifest.mpd` | GStreamer (`dashdemux`) |
+| Local files | `/path/movie.mkv` | GStreamer |
+
+## Requirements
+
+**Build:** Rust ≥ 1.85, `pkg-config`, GStreamer 1.14+ development headers
+(`gstreamer`, `gstreamer-app`, `gstreamer-video`), Vulkan or GL drivers.
+
+```sh
+# Arch / Manjaro
+sudo pacman -S --needed rust pkgconf gstreamer gst-plugins-{base,good,bad,ugly} gst-libav
+
+# Debian / Ubuntu
+sudo apt install build-essential pkg-config libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-{base,good,bad,ugly} gstreamer1.0-libav
+```
+
+**Runtime:** `yt-dlp` (YouTube and other extractor sites), `ffprobe`
+(audio-only detection). Both are optional — the app degrades gracefully and
+tells you what is missing.
+
+```sh
+sudo pacman -S yt-dlp ffmpeg     # or: pipx install yt-dlp
+```
+
+## Build and run
+
+```sh
+cargo build --release
+./target/release/stream-player                      # then paste a URL
+./target/release/stream-player "https://youtu.be/X" # or start immediately
+```
+
+## Controls
+
+| Input | Action |
+|---|---|
+| `Space` | Play / pause |
+| `←` / `→` | Seek ∓ 10 s |
+| `↑` / `↓` | Volume ± 5 % |
+| `M` | Mute |
+| `F` | Fullscreen |
+| Click the URL bar | Paste from clipboard |
+| Click the timeline | Seek to that position |
+
+Buttons: `« 60`, `‹ 10`, play/pause, `10 ›`, `60 »`, speed `−`/`+` (click the
+value to reset to 1×), mute, volume `−`/`+`, fullscreen.
+
+## Architecture
+
+```
+src/
+├── main.rs    entry point, dependency checks, CLI arg
+├── source.rs  URL classification + resolution (yt-dlp, ffprobe), file:// URLs
+├── player.rs  playback engine: video backend + audio backend, transport state
+└── ui.rs      GPUI view: layout, transport bar, keyboard, seek bar
+```
+
+### Why two playback backends
+
+`gpui-video-player` builds its pipeline as:
+
+```
+playbin video-sink="videoscale ! videoconvert ! appsink caps=video/x-raw,format=NV12 ..."
+```
+
+and then reads the appsink pad's caps for width/height/framerate, returning
+`Error::Caps` when they are absent. **An MP3, an Icecast stream, or any
+audio-only source has no video pad, so `Video::new` always fails for them.**
+
+`player.rs` therefore has two paths behind one `Engine` enum:
+
+- `Engine::Video` — `gpui-video-player` for anything with a video track.
+- `Engine::Audio` — an owned `playbin` with `autoaudiosink`, exposing the same
+  transport surface (position, duration, seek, volume, speed).
+
+`source.rs` decides which one to use via `ffprobe` (`has_video`). If the probe
+is wrong or missing, `Engine::open` falls back to the other backend rather than
+failing.
+
+## Things worth knowing
+
+**Fonts can dominate startup time.** GPUI's text stack calls
+`fontdb::Database::load_system_fonts()` at startup, which enumerates every font
+fontconfig knows about. A machine with a very large font collection (this repo
+was developed on one with 14 GB / 9,231 files under `~/.local/share/fonts`)
+spends minutes in page faults before the first frame. If startup is slow:
+
+```sh
+# Scope fontconfig to a small set of directories
+cat > ~/.config/fontconfig/fonts.conf <<'EOF'
+<?xml version="1.0"?><!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <dir>/usr/share/fonts</dir>
+  <cachedir>/var/cache/fontconfig</cachedir>
+</fontconfig>
+EOF
+```
+
+Or launch with `FONTCONFIG_FILE=/path/to/minimal.conf`.
+
+**Keep the binary on local disk.** `target/release/stream-player` is ~26 MB, but
+a debug build is ~500 MB; launching it from a slow network/HDD mount adds
+noticeable startup latency from demand paging.
+
+**Livestreams disable seeking** on purpose — `AudioSession` refuses to seek when
+the pipeline reports no duration, because a flush-seek on a live source stalls
+the stream.
+
+**Known limitations**
+
+- YouTube is resolved to a single **progressive (muxed)** file via
+  `yt-dlp -f 'b[protocol^=http]'`. This keeps one URL → one pipeline, but caps
+  quality at what YouTube serves muxed (usually 360–720p). DASH audio+video
+  remuxing would need `yt-dlp` to download/merge and hand us a local file.
+- Subtitles are parsed by the underlying crate but not rendered by this app
+  (`gpui-video-player` keeps subtitle text private in 0.1.3).
+- No playlist handling; one source at a time.
+
+## Dependency workaround
+
+`vendor/xattr` is a copy of `xattr` 0.2.3 with one line changed. It is pulled in
+transitively via `gpui → gpui_http_client → zed-async-tar`, and 0.2.3 does not
+compile against libc ≥ 0.2.182 (`ENOATTR` was removed from the Linux bindings).
+We can't downgrade libc (rustix 1.1.6 requires ≥ 0.2.182) or bump xattr
+(`zed-async-tar` pins `0.2`). The patch defines `ENOATTR` as `ENODATA` on Linux,
+which is what it always aliased. See `Cargo.toml [patch.crates-io]`.
+
+`.cargo/config.toml` pins `PKG_CONFIG=/usr/bin/pkg-config` with the system `.pc`
+paths, because a Homebrew `pkg-config` earlier in `PATH` will not find a
+distro-packaged GStreamer.
+
+## Tests
+
+```sh
+cargo test
+```
+
+Six unit tests cover URL classification: YouTube routing, direct media,
+manifests, query-string host confusion, garbage rejection, and `file://`
+percent-encoding.

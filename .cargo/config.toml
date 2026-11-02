@@ -1,0 +1,10 @@
+# GStreamer on this host is packaged by the system (pacman), but PATH resolves
+# Homebrew's pkg-config first, and Homebrew's pkg-config only searches its own
+# tree. Without this, `gstreamer-sys`'s build script fails with
+# "The system library gstreamer-1.0 ... was not found".
+#
+# Pin the system pkg-config and add the system .pc directories explicitly.
+# Override with your own PKG_CONFIG / PKG_CONFIG_PATH if you build elsewhere.
+[env]
+PKG_CONFIG = { value = "/usr/bin/pkg-config", force = false }
+PKG_CONFIG_PATH = { value = "/usr/lib/pkgconfig:/usr/share/pkgconfig", force = false }

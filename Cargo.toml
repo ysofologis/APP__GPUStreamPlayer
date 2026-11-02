@@ -1,0 +1,27 @@
+[package]
+name = "stream-player"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A GPUI-based stream player for Linux: YouTube, MP3/Icecast radio, HLS/DASH and local files"
+
+[dependencies]
+gpui = "0.2"
+gpui-video-player = "0.1.3"
+url = "2"
+log = "0.4"
+env_logger = "0.11"
+
+# ---------------------------------------------------------------------------
+# Dependency workaround
+# ---------------------------------------------------------------------------
+# `xattr` 0.2.3 (pulled in transitively via gpui -> gpui_http_client ->
+# zed-async-tar) does not compile against libc >= 0.2.182, because libc removed
+# `ENOATTR` from the Linux bindings. We cannot downgrade libc: rustix 1.1.6
+# (via gpui -> wayland-backend) requires >= 0.2.182. We also cannot simply bump
+# xattr: zed-async-tar pins "0.2".
+#
+# So we vendor xattr 0.2.3 with one line changed: on Linux, ENOATTR is defined
+# as ENODATA, which is what ENOATTR always aliased. See vendor/xattr/src/sys/mod.rs.
+[patch.crates-io]
+xattr = { path = "vendor/xattr" }
