@@ -6,17 +6,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, FocusHandle,
-    KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Render, Window, WindowBounds,
-    WindowOptions,
+    div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, FocusHandle,
+    KeyDownEvent, MouseButton, MouseDownEvent, ObjectFit, Pixels, Point, Render, Window,
+    WindowBounds, WindowOptions,
 };
 use gpui_video_player::video;
 
+use crate::metadata::{self, TrackInfo};
 use crate::player::Engine;
 use crate::source::{self, ResolveError, Resolved};
 
-const WINDOW_W: f32 = 1100.0;
-const WINDOW_H: f32 = 720.0;
+const WINDOW_W: f32 = 1280.0;
+const WINDOW_H: f32 = 760.0;
+/// Width of the right-hand info panel.
+const PANEL_W: f32 = 320.0;
 
 // Palette -- one place to retheme.
 const BG: u32 = 0x0d1117;
@@ -71,6 +74,12 @@ pub struct PlayerView {
     polling: Arc<AtomicBool>,
     /// Shown beneath the video while a stream has no video track.
     last_load_ms: Option<u128>,
+    /// Metadata for the right-hand info panel.
+    info: TrackInfo,
+    /// True while `metadata::fetch` is running for the current source.
+    info_loading: bool,
+    /// Scroll position of the info panel; reset to the top on every new source.
+    info_scroll: gpui::ScrollHandle,
 }
 
 impl PlayerView {
@@ -93,6 +102,9 @@ impl PlayerView {
             focus: cx.focus_handle(),
             polling: Arc::new(AtomicBool::new(false)),
             last_load_ms: None,
+            info: TrackInfo::default(),
+            info_loading: false,
+            info_scroll: gpui::ScrollHandle::new(),
         };
         view.start_transport_poll(cx);
         view
@@ -175,23 +187,60 @@ impl PlayerView {
                 view.loading = false;
                 view.last_load_ms = Some(elapsed);
                 match resolved {
-                    Ok(resolved) => match Engine::open(
-                        &resolved.kind.playable_url(),
-                        resolved.probe.has_video,
-                    ) {
-                        Ok(engine) => {
-                            view.apply_new_engine(engine, resolved);
+                    Ok(resolved) => {
+                        // Start the metadata fetch before moving `resolved` into
+                        // the engine, so the panel fills in while the first
+                        // frames are still decoding.
+                        view.load_metadata(&resolved.kind, resolved.probe.duration_secs, cx);
+                        match Engine::open(
+                            &resolved.kind.playable_url(),
+                            resolved.probe.has_video,
+                        ) {
+                            Ok(engine) => {
+                                view.apply_new_engine(engine, resolved);
+                            }
+                            Err(error) => {
+                                view.error = Some(error);
+                                view.engine = None;
+                            }
                         }
-                        Err(error) => {
-                            view.error = Some(error);
-                            view.engine = None;
-                        }
-                    },
+                    }
                     Err(error) => {
                         view.error = Some(describe_error(error));
                         view.engine = None;
+                        view.info = TrackInfo::default();
                     }
                 }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Fetch panel metadata on a background thread.
+    ///
+    /// Separate from `load_url` on purpose: `yt-dlp -J` and poster extraction
+    /// take hundreds of milliseconds, and the video should start playing
+    /// without waiting for the panel to fill in.
+    fn load_metadata(&mut self, kind: &source::SourceKind, duration: Option<f64>, cx: &mut Context<Self>) {
+        let kind = kind.clone();
+        self.info = TrackInfo::default();
+        self.info_loading = true;
+        self.info_scroll.set_offset(gpui::Point {
+            x: gpui::px(0.0),
+            y: gpui::px(0.0),
+        });
+
+        cx.spawn(async move |this, cx| {
+            let info = cx
+                .background_executor()
+                .spawn(async move { metadata::fetch(&kind, duration) })
+                .await;
+
+            this.update(cx, |view, cx| {
+                view.info = info;
+                view.info_loading = false;
                 cx.notify();
             })
             .ok();
@@ -266,6 +315,262 @@ impl PlayerView {
             self.duration = engine.duration();
         }
         cx.notify();
+    }
+
+
+    // -- right-hand info panel ----------------------------------------------
+
+    /// A labelled "key / value" row. Returns `None` when the value is missing so
+    /// absent facts leave no gap.
+    fn info_row(&self, label: &'static str, value: Option<String>) -> Option<impl IntoElement> {
+        let value = value.filter(|v| !v.is_empty())?;
+        Some(
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(0x6e7681))
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(TEXT))
+                        .child(value),
+                ),
+        )
+    }
+
+    /// Horizontal rule. `flex_none` because a 1px flex child in an overflowing
+    /// column shrinks to nothing.
+    fn divider(&self) -> impl IntoElement {
+        div().flex_none().h(px(1.0)).w_full().bg(rgb(BORDER))
+    }
+
+    fn section(&self, title: &'static str) -> impl IntoElement {
+        div()
+            .text_xs()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(MUTED))
+            .child(title)
+    }
+
+    /// Cover art, or a generated placeholder block when there is none.
+    fn artwork(&self) -> impl IntoElement {
+        // No aspect-ratio helper in this GPUI version; a fixed square-ish box
+        // keeps the panel layout stable regardless of artwork aspect.
+        // `flex_none` is essential: the panel column overflows its height, and a
+        // flex child with the default `flex_shrink: 1` collapses to zero height
+        // before the scroll container ever gets a chance to scroll.
+        let frame = div()
+            .flex_none()
+            .w_full()
+            .h(px(190.0))
+            .rounded_lg()
+            .bg(rgb(0x1c2128))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .overflow_hidden();
+
+        match &self.info.artwork {
+            Some(path) => frame.child(
+                img(std::sync::Arc::<std::path::Path>::from(path.as_path()))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover),
+            ),
+            None => frame.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_3xl()
+                    .text_color(rgb(0x30363d))
+                    .child(if self.audio_only { "♪" } else { "▮" }),
+            ),
+        }
+    }
+
+    fn info_panel(&self) -> impl IntoElement {
+        let info = &self.info;
+
+        let shell = div()
+            .id("info-panel")
+            .w(px(PANEL_W))
+            .flex_none()
+            .h_full()
+            .min_h(px(0.0))
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .bg(rgb(PANEL))
+            .border_1()
+            .border_color(rgb(BORDER))
+            .overflow_hidden();
+
+        let mut body = div()
+            .id("info-scroll")
+            .flex_1()
+            .min_h(px(0.0))
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .p_3()
+            .track_scroll(&self.info_scroll)
+            .overflow_y_scroll();
+
+        // Nothing loaded yet: say so instead of showing an empty shell.
+        if self.current.is_none() {
+            return shell
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(div().text_xl().text_color(rgb(0x30363d)).child("ℹ"))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(rgb(MUTED))
+                        .text_center()
+                        .child("Track details appear here once something is playing"),
+                );
+        }
+
+        body = body.child(self.artwork());
+
+        // Title block: title, then author.
+        if let Some(title) = info.title.clone() {
+            body = body.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .text_color(rgb(TEXT))
+                            .line_clamp(3)
+                            .child(title),
+                    )
+                    .when_some(info.author.clone(), |this, author| {
+                        this.child(div().text_sm().text_color(rgb(ACCENT)).child(author))
+                    }),
+            );
+        } else if self.info_loading {
+            body = body.child(
+                div()
+                    .text_sm()
+                    .text_color(rgb(MUTED))
+                    .child("Reading metadata…"),
+            );
+        }
+
+        // Playback facts.
+        let resolution = info.resolution.clone();
+        let container = info.container.clone().map(|c| c.to_uppercase());
+        let codecs = match (info.video_codec.clone(), info.audio_codec.clone()) {
+            (Some(v), Some(a)) => Some(format!("{v} / {a}")),
+            (Some(v), None) => Some(v),
+            (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        let audio_detail = match (info.sample_rate.clone(), info.channels.clone()) {
+            (Some(rate), Some(ch)) => Some(format!("{rate} · {ch}")),
+            (Some(rate), None) => Some(rate),
+            (None, Some(ch)) => Some(ch),
+            (None, None) => None,
+        };
+
+        let mut facts = div().flex().flex_col().gap_2();
+        let mut any = false;
+        for row in [
+            self.info_row("FORMAT", container),
+            self.info_row("RESOLUTION", resolution),
+            self.info_row("CODECS", codecs),
+            self.info_row("BITRATE", info.bitrate.clone()),
+            self.info_row("AUDIO", audio_detail),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            any = true;
+            facts = facts.child(row);
+        }
+        if any {
+            body = body.child(self.divider());
+            body = body.child(self.section("STREAM"));
+            body = body.child(facts);
+        }
+
+        // Popularity / provenance.
+        let mut meta = div().flex().flex_col().gap_2();
+        let mut any_meta = false;
+        let views = info.view_count.map(format_count);
+        let likes = info.like_count.map(format_count);
+        for row in [
+            self.info_row("CHANNEL", None::<String>),
+            self.info_row("UPLOADED", info.upload_date.clone()),
+            self.info_row("VIEWS", views),
+            self.info_row("LIKES", likes),
+            self.info_row("SOURCE", info.provider.clone()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            any_meta = true;
+            meta = meta.child(row);
+        }
+        if any_meta {
+            body = body.child(self.divider());
+            body = body.child(self.section("ABOUT"));
+            body = body.child(meta);
+        }
+
+        // Categories / tags.
+        if !info.categories.is_empty() || !info.tags.is_empty() {
+            let mut tags = div().flex().flex_wrap().gap_1();
+            for cat in info.categories.iter() {
+                tags = tags.child(self.chip(cat.clone(), ACCENT));
+            }
+            for tag in info.tags.iter() {
+                tags = tags.child(self.chip(tag.clone(), 0x6e7681));
+            }
+            body = body.child(self.divider());
+            body = body.child(self.section("TAGS"));
+            body = body.child(tags);
+        }
+
+        // Description last: it is the longest block and the least urgent.
+        if let Some(description) = info.description.clone() {
+            body = body.child(self.divider());
+            body = body.child(self.section("DESCRIPTION"));
+            body = body.child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(MUTED))
+                    .line_height(gpui::relative(1.45))
+                    .child(description),
+            );
+        }
+
+        shell.child(body)
+    }
+
+    fn chip(&self, text: String, color: u32) -> impl IntoElement {
+        div()
+            .px_2()
+            .py(px(2.0))
+            .rounded_full()
+            .bg(rgba(0xffffff10))
+            .border_1()
+            .border_color(rgba(0xffffff18))
+            .text_xs()
+            .text_color(rgb(color))
+            .child(text)
     }
 
     // -- rendering helpers ---------------------------------------------------
@@ -690,7 +995,25 @@ impl Render for PlayerView {
             }))
             .child(self.header(cx))
             .when_some(status, |this, status| this.child(status))
-            .child(self.stage())
+            .child(
+                div()
+                    .id("main-row")
+                    .flex()
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .w_full()
+                    .gap_2()
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .min_h(px(0.0))
+                            .h_full()
+                            .child(self.stage()),
+                    )
+                    .child(self.info_panel()),
+            )
             .child(self.transport_bar(cx))
     }
 }
@@ -723,6 +1046,16 @@ fn format_time(duration: Duration) -> String {
         format!("{hours}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes}:{seconds:02}")
+    }
+}
+
+/// `23497972` -> `23.5M`.
+fn format_count(value: u64) -> String {
+    match value {
+        0..=999 => value.to_string(),
+        1_000..=999_999 => format!("{:.1}K", value as f64 / 1_000.0),
+        1_000_000..=999_999_999 => format!("{:.1}M", value as f64 / 1_000_000.0),
+        _ => format!("{:.1}B", value as f64 / 1_000_000_000.0),
     }
 }
 

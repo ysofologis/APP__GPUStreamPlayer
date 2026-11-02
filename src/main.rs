@@ -3,6 +3,7 @@
 //! Supports YouTube (via `yt-dlp`), direct audio streams (MP3/Icecast/OGG),
 //! HLS/DASH manifests, and local media files.
 
+mod metadata;
 mod player;
 mod source;
 mod ui;

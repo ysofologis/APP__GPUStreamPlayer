@@ -5500,6 +5500,7 @@ dependencies = [
  "gpui",
  "gpui-video-player",
  "log",
+ "serde_json",
  "url",
 ]
 

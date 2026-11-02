@@ -62,11 +62,32 @@ value to reset to 1×), mute, volume `−`/`+`, fullscreen.
 
 ```
 src/
-├── main.rs    entry point, dependency checks, CLI arg
-├── source.rs  URL classification + resolution (yt-dlp, ffprobe), file:// URLs
-├── player.rs  playback engine: video backend + audio backend, transport state
-└── ui.rs      GPUI view: layout, transport bar, keyboard, seek bar
+├── main.rs      entry point, dependency checks, CLI arg
+├── source.rs    URL classification + resolution (yt-dlp, ffprobe), file:// URLs
+├── metadata.rs  track info for the side panel (yt-dlp -J / ffprobe / artwork)
+├── player.rs    playback engine: video backend + audio backend, transport state
+└── ui.rs        GPUI view: layout, transport bar, keyboard, seek bar, info panel
 ```
+
+### The info panel
+
+The right-hand panel shows what can be learned about the current source:
+
+| Field | Source |
+|---|---|
+| Cover art | `yt-dlp` thumbnail (downloaded + cached), or an embedded cover / poster frame extracted with `ffmpeg` for local files |
+| Title, channel/artist, description | `yt-dlp -J`, or container tags for local files |
+| Format, resolution, codecs, bitrate, sample rate, channels | `ffprobe` |
+| Upload date, views, likes, categories, tags | `yt-dlp -J` |
+| Provenance (`yt-dlp` / `ffprobe`) | which tool supplied the facts |
+
+Metadata is fetched **after** playback starts, on a background thread, so a slow
+extractor never delays the first frame. Artwork is cached under
+`$XDG_CACHE_HOME/stream-player/`, so it survives CDN URL expiry and needs no
+network on replay.
+
+Fields that a given source cannot provide are omitted rather than shown as
+`N/A`, and the panel scrolls independently of the video.
 
 ### Why two playback backends
 
@@ -118,6 +139,12 @@ noticeable startup latency from demand paging.
 **Livestreams disable seeking** on purpose — `AudioSession` refuses to seek when
 the pipeline reports no duration, because a flush-seek on a live source stalls
 the stream.
+
+**Panel layout gotcha (GPUI).** In a flex column, a child that overflows gets
+`flex_shrink: 1` by default and collapses to zero height *before* a sibling
+scroll container can scroll. Fixed-height blocks in the panel (artwork, 1px
+dividers) therefore need `flex_none()`; without it the artwork silently
+disappears while the rest of the panel renders normally.
 
 **Known limitations**
 
