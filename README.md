@@ -36,6 +36,7 @@ audio streams, and local media — behind one transport UI.
 - [Build and run](#build-and-run)
 - [Usage](#usage)
 - [YouTube and the bot check](#youtube-and-the-bot-check)
+- [Contributing](#contributing)
 - [Known limitations](#known-limitations)
 - [Troubleshooting](#troubleshooting)
 - [Repository layout](#repository-layout)
@@ -490,8 +491,122 @@ crates.io. Treat upgrades to either as deliberate work rather than a routine
 
 ---
 
+## Contributing
+
+**This project is young and the feature set is deliberately narrow. It wants
+your help to grow.**
+
+The player currently handles exactly one source at a time, resolves YouTube
+through a single muxed progressive stream, and renders subtitles nowhere. Each
+of those is a decision that was made to get a working player on screen, not a
+principle. They are the most obvious places where a contribution would
+change the experience the most.
+
+### Where help would have the most impact
+
+**Higher quality from YouTube (and other DASH sources).** Right now the
+resolver asks `yt-dlp` for a single muxed HTTP file, which caps quality at
+what YouTube serves progressive — usually 360–720p. The real fix is to
+request the separate audio and video DASH streams, remux them, and hand the
+player a local file. `gpui-video-player` exposes
+`Video::from_gst_pipeline`, so a custom pipeline is already possible.
+
+**Subtitle rendering.** The upstream crate parses subtitle *text* into a
+`pub(crate)` field and paints it internally. Upstreaming an accessor, or
+forking the element to render a cue track, would unlock subtitles.
+
+**A playlist / queue.** The `Engine` abstraction already cleanly separates
+"what is playing" from "how it is rendered"; a queue is mostly UI plus a
+little state.
+
+**Hardware-accelerated decoding on Linux.** The upstream rendering path
+converts NV12 to BGRA on the CPU and uploads a sprite per frame, which is
+comfortable at 1080p30 and a bottleneck at 4K. A `glupload` / `wgpu` path
+would remove the CPU conversion entirely.
+
+**Better metadata coverage.** The panel currently shows what `yt-dlp -J` and
+`ffprobe` happen to provide. Chapters, playlists, subtitles, comments,
+"now playing" integrations and richer artwork handling are all open.
+
+**Playback persistence.** Nothing is remembered between runs: no library, no
+recent files, no resume positions, no per-source settings.
+
+**Platforms.** The code is Linux-only in practice. Windows and macOS would
+need the platform-specific paths in the upstream crate revisited.
+
+**Packaging.** There is no `.desktop` file, no AppImage / Flatpak, no
+systemd user unit. Packaging is usually the last mile that stops a project
+from being usable by anyone but its author.
+
+### How to contribute
+
+```sh
+git clone https://github.com/ysofologis/APP__GPUStreamPlayer.git
+cd APP__GPUStreamPlayer
+cargo build --release
+cargo test
+```
+
+Open an issue describing what you want to change before starting anything
+large — the upstream `gpui` API moves between versions, and a short
+discussion avoids a lot of rework.
+
+Useful things to keep in mind while hacking:
+
+- `player.rs` keeps both playback backends behind one `Engine` enum. Add new
+  transport capabilities there, not in the UI.
+- `source.rs` owns URL classification and resolution. If a new site needs
+  special handling, that is where it goes.
+- `ui.rs` is the largest module (~1,340 lines) and the one most likely to
+  need splitting.
+- `text_input.rs` is a self-contained GPUI text widget; it is usable on its
+  own if you want to lift it.
+- `vendor/xattr` is a **patched copy of a third-party crate**. Do not edit it
+  casually — the one-line change is documented in `vendor/xattr/src/sys/mod.rs`
+  and the reasoning lives in `Cargo.toml`.
+
+### Upstream dependencies
+
+Contributions that also help upstream are very welcome:
+
+- [`gpui-video-player`](https://crates.io/crates/gpui-video-player) is a
+  single-maintainer project with **zero reverse dependencies**. An issue
+  reporting a GPUI 0.2 API break, or a pull request exposing the subtitle
+  text, would be genuinely useful.
+- [`gpui`](https://github.com/zed-industries/zed) is pre-1.0 and moves fast.
+  Patches for real bugs are welcome upstream; the community benefits more
+  than this repository does.
+
+---
+
 ## License
 
-The code in this repository is provided as-is for personal use. It links
-against `gpui` (Apache-2.0/MIT), `gpui-video-player` (MIT) and `gstreamer-rs`
-(MIT).
+Released under the [MIT License](LICENSE).
+
+```text
+MIT License
+
+Copyright (c) 2026 stream-player contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+It links against `gpui` (Apache-2.0/MIT), `gpui-video-player` (MIT),
+`gstreamer-rs` (MIT) and a patched copy of `xattr` (MIT, see
+`vendor/xattr/LICENSE-MIT`).
