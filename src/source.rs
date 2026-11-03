@@ -15,6 +15,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::quality;
+
 /// Where a playable stream comes from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceKind {
@@ -235,6 +237,26 @@ fn looks_like_direct_media(url: &str) -> bool {
         || path.ends_with("/;")
 }
 
+/// Ask yt-dlp for a stream at the default height (720p).
+///
+/// Returns `None` when the source does not offer a muxed stream at that
+/// height, in which case the caller falls back to the best muxed progressive
+/// stream (360p on YouTube).
+fn height_pinned_stream(page: &str) -> Option<String> {
+    let url = quality::find_stream_url(
+        page,
+        quality::DEFAULT_HEIGHT,
+        &yt_dlp_cookie_args(),
+        &quality::player_client_args(),
+    )?;
+    log::info!(
+        "using {}p stream: {}",
+        quality::DEFAULT_HEIGHT,
+        &url[..url.len().min(96)]
+    );
+    Some(url)
+}
+
 /// Ask yt-dlp for a single file that already contains both video and audio.
 ///
 /// Preference order matters:
@@ -247,6 +269,12 @@ fn looks_like_direct_media(url: &str) -> bool {
 fn yt_dlp_stream(page: &str) -> Result<String, ResolveError> {
     if !binary_exists("yt-dlp") {
         return Err(ResolveError::MissingBinary("yt-dlp"));
+    }
+
+    // Preferred: the highest muxed stream at the default height (720p).
+    // This needs the HLS ladder, which only a client that offers it exposes.
+    if let Some(url) = height_pinned_stream(page) {
+        return Ok(url);
     }
 
     // Progressive/muxed first; `-g` prints URLs only.

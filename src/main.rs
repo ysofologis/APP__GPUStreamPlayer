@@ -5,6 +5,7 @@
 
 mod metadata;
 mod player;
+mod quality;
 mod source;
 mod text_input;
 mod ui;
