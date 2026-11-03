@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, Entity,
+    canvas, div, img, prelude::*, px, rgb, rgba, size, App, Bounds, Context, CursorStyle, Entity,
     FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
     ObjectFit, PathPromptOptions, Pixels, Point, Render, Window, WindowBounds, WindowOptions,
 };
@@ -955,6 +955,11 @@ impl PlayerView {
         let base = div()
             .flex_1()
             .w_full()
+            // A percentage height resolves against an *indefinite* parent
+            // height, and this stage's height is content-derived: without
+            // `h_full` the canvas below collapses to zero height (the video
+            // then has a zero-height destination and paints nothing).
+            .h_full()
             .flex()
             .items_center()
             .justify_center()
@@ -965,9 +970,36 @@ impl PlayerView {
         match (&self.engine, self.audio_only) {
             (Some(engine), false) => match engine.video_handle() {
                 Some(handle) => base.child(
-                    video(handle)
-                        .id("main-video")
-                        .buffer_capacity(6),
+                    // `VideoElement::request_layout` hardcodes a box at the
+                    // video's native resolution, so a plain child does not
+                    // follow window resizes. Drive the element from a
+                    // size_full canvas instead: GPUI gives the canvas the
+                    // stage's real bounds, and we hand those to the video's
+                    // paint path, which aspect-fits the frame inside them
+                    // (letterboxed against the black stage).
+                    canvas(
+                        |_, _, _| (),
+                        move |bounds, _, window, cx| {
+                            let mut element = video(handle.clone())
+                                .id("main-video")
+                                .buffer_capacity(6);
+                            let mut layout = ();
+                            // Their prepaint also schedules the repaint for
+                            // the next playing frame; ours is a no-op.
+                            let mut prepaint =
+                                element.prepaint(None, None, bounds, &mut layout, window, cx);
+                            element.paint(
+                                None,
+                                None,
+                                bounds,
+                                &mut layout,
+                                &mut prepaint,
+                                window,
+                                cx,
+                            );
+                        },
+                    )
+                    .size_full(),
                 ),
                 None => base.child(self.audio_placeholder()),
             },
