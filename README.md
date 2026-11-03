@@ -32,6 +32,7 @@ audio streams, and local media — behind one transport UI.
 
 - [Scope](#scope)
 - [How it works](#how-it-works)
+- [Video quality](#video-quality)
 - [Dependencies](#dependencies)
 - [Build and run](#build-and-run)
 - [Usage](#usage)
@@ -197,6 +198,31 @@ field built the way GPUI's own `examples/input.rs` does it:
   field does not seek or mute.
 
 ---
+
+## Video quality
+
+The player asks for **720p** by default and falls back to the best muxed
+stream when the source does not offer that height.
+
+Getting above 360p on YouTube is not a matter of picking a format ID. YouTube
+publishes a *muxed* (audio+video in one file) progressive stream only at 360p;
+every higher format is video-only DASH, and because the player hands a single
+URL to GStreamer's `playbin`, a video-only URL would play with no sound. The
+muxed shapes above 360p are the HLS variants.
+
+The catch is that the available formats depend on the player client yt-dlp
+impersonates. With cookies, the default client offers **no HLS at all**, so a
+plain height filter fails with `Requested format is not available` even when
+720p exists. The player therefore probes with
+`--extractor-args youtube:player_client=web_embedded`, which keeps the HLS
+ladder available for signed-in requests.
+
+| Source | Result |
+|---|---|
+| YouTube video with 720p | 1280x720 HLS, audio intact |
+| YouTube video without 720p | best muxed progressive (usually 360p) |
+| Direct MP3 / Icecast | unchanged (audio-only path) |
+| Local file, HLS URL | unchanged (used as-is) |
 
 ## Dependencies
 
@@ -447,6 +473,7 @@ stream-player/
 ├── src/
 │   ├── main.rs             entry point, dependency checks, CLI argument
 │   ├── source.rs           URL classification, yt-dlp/ffprobe resolution
+│   ├── quality.rs          default quality (720p) selection for YouTube
 │   ├── player.rs           Engine: video backend + audio backend, transport
 │   ├── metadata.rs         info-panel facts, artwork download/extraction
 │   ├── text_input.rs       single-line editable text field for GPUI 0.2
